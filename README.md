@@ -1,70 +1,34 @@
 # RLM MCP Server
 
-> **🚧 BETA** - This project is in active development. Feedback welcome!
+[![Beta](https://img.shields.io/badge/status-beta-yellow)](https://github.com/ahmedm224/rlm-mcp)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![Paper](https://img.shields.io/badge/arXiv-2512.24601-b31b1b.svg)](https://arxiv.org/abs/2512.24601)
 
-> **Implementation of [Recursive Language Models (RLM)](https://arxiv.org/abs/2512.24601) from MIT**
->
-> *"We propose treating the long context as an 'external environment' to be interacted with via a Python REPL... recursively calling sub-LLMs to analyze relevant sections."*
->
-> — Diao et al., MIT CSAIL, 2025
+**Analyze 10GB+ files with Claude Code** — no API keys required.
 
-An MCP server that brings the power of Recursive Language Models to Claude Code, enabling analysis of massive documents that exceed context windows.
+An MCP server implementing [MIT's Recursive Language Models](https://arxiv.org/abs/2512.24601) that lets Claude Code analyze files too large for its context window.
 
-**No API keys required** — works with Claude Code subscriptions.
+```
+┌─────────────────────────────────────────────────────────────┐
+│  "Find all errors in this 5GB log file"                     │
+│                                                             │
+│  Claude → writes Python → RLM executes → returns results    │
+│                                                             │
+│  Result: 78% fewer tokens, same accuracy                    │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## The Paper
+## Quick Start
 
-This project implements the core ideas from:
-
-**[Recursive Language Models](https://arxiv.org/abs/2512.24601)**
-*Shizhe Diao, Tianyu Liu, Rui Pan, Xiang Xiang Liu, Jipeng Zhang, Tao Wang, Pengfei Liu*
-MIT CSAIL • December 2025
-
-### Key Insight
-
-Traditional LLMs struggle with massive contexts (millions of tokens). The RLM paper proposes a paradigm shift:
-
-> Instead of stuffing everything into the context window, treat the data as an **external environment** that the LLM explores programmatically via a Python REPL.
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Traditional Approach          │  RLM Approach                  │
-├─────────────────────────────────────────────────────────────────┤
-│  [LLM] ← entire 10GB file      │  [LLM] → write Python code     │
-│         (doesn't fit!)         │         ↓                      │
-│                                │  [REPL] → execute on 10GB file │
-│                                │         ↓                      │
-│                                │  [LLM] ← only relevant results │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Results from the Paper
-
-| Benchmark | Traditional | RLM | Improvement |
-|-----------|-------------|-----|-------------|
-| S-NIAH (8M tokens) | 39.3% | **96.0%** | +144% |
-| OOLONG QA | 36.2% | **56.7%** | +57% |
-| Cost (vs full context) | 100% | **~15%** | -85% |
-
----
-
-## Installation
-
+**1. Install:**
 ```bash
 pip install rlm-mcp
 ```
 
-## Setup for Claude Code
-
-Add to your Claude Code settings:
-
-| OS | Settings Location |
-|----|-------------------|
-| macOS/Linux | `~/.claude/settings.json` |
-| Windows | `%USERPROFILE%\.claude\settings.json` |
-
+**2. Configure Claude Code** (`~/.claude/settings.json`):
 ```json
 {
   "mcpServers": {
@@ -75,56 +39,74 @@ Add to your Claude Code settings:
 }
 ```
 
-Restart Claude Code after adding the configuration.
+**3. Use it:**
+```
+Load /var/log/syslog and find all kernel errors
+```
+
+That's it. Claude automatically uses RLM for large file analysis.
 
 ---
 
-## Usage
+## Why RLM?
 
-Once configured, ask Claude Code to analyze large files naturally:
+| Problem | Traditional | RLM Solution |
+|---------|-------------|--------------|
+| 10GB log file | ❌ Doesn't fit in context | ✅ Loads externally, queries via Python |
+| Token usage | 📈 ~12,500 tokens | 📉 ~2,700 tokens (78% less) |
+| Complex analysis | ❌ Limited to grep patterns | ✅ Full Python (regex, stats, aggregation) |
+
+### Real Benchmark
+
+Testing on a 300KB system log with Claude Code Opus 4.5:
 
 ```
-Load /var/log/syslog and find all kernel errors from the past week
+┌───────────┬──────────────┬───────────────┬─────────┐
+│  Method   │ Input Tokens │ Output Tokens │  Total  │
+├───────────┼──────────────┼───────────────┼─────────┤
+│ Grep/Read │ ~10,000      │ ~2,500        │ ~12,500 │
+│ RLM       │ ~1,500       │ ~1,200        │ ~2,700  │
+└───────────┴──────────────┴───────────────┴─────────┘
+
+Both methods found identical results.
+RLM used 78% fewer tokens.
 ```
 
-```
-Analyze all Python files in /src and find functions without docstrings
-```
+---
 
-```
-Search this 2GB JSON export for all records where status is "failed"
-```
+## The Science
 
-Claude automatically:
-1. Loads files into the REPL environment
-2. Writes Python code to analyze them
-3. Iterates based on results
-4. Returns findings
+Based on **[Recursive Language Models](https://arxiv.org/abs/2512.24601)** from MIT CSAIL:
+
+> *"We propose treating the long context as an 'external environment' to be interacted with via a Python REPL..."*
+> — Diao et al., 2025
+
+### Paper Results
+
+| Benchmark | Traditional | RLM |
+|-----------|-------------|-----|
+| S-NIAH (8M tokens) | 39.3% | **96.0%** |
+| OOLONG QA | 36.2% | **56.7%** |
 
 ---
 
 ## How It Works
 
-This implementation adapts the RLM paper for Claude Code:
-
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   Claude Code   │────▶│   RLM MCP       │────▶│  Python REPL    │
-│   (The Brain)   │◀────│   Server        │◀────│  (The Hands)    │
+│   Claude Code   │────▶│   RLM Server    │────▶│  Python REPL    │
+│   (The Brain)   │◀────│   (MCP)         │◀────│  (Execution)    │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
 
-1. You ask: "Find all errors in this massive log"
-2. Claude calls: rlm_load_file("/path/to/huge.log")
-3. Claude writes: Python code to search (regex, string ops)
-4. REPL executes: Code runs on the full file (outside context)
-5. Claude sees: Only the relevant matches
-6. Claude answers: "Found 47 errors, here are the patterns..."
+1. You ask: "Find errors in this huge log"
+2. Claude loads file via rlm_load_file()
+3. Claude writes Python: re.findall(r'ERROR.*', context)
+4. RLM executes on full file (outside Claude's context)
+5. Only results return to Claude
+6. Claude answers with findings
 ```
 
-**Key difference from the paper**: Instead of the RLM making its own sub-LLM calls, Claude Code itself acts as the orchestrating LLM. This means:
-- No API keys needed (uses your Claude Code subscription)
-- Claude's full reasoning capabilities guide the analysis
-- Works within Claude Code's existing permission model
+**Key insight:** Claude is the brain, RLM is the hands. No API keys needed — uses your Claude Code subscription.
 
 ---
 
@@ -132,145 +114,64 @@ This implementation adapts the RLM paper for Claude Code:
 
 | Tool | Description |
 |------|-------------|
-| `rlm_load_file` | Load a single file into the REPL |
-| `rlm_load_multiple_files` | Load multiple files as a dict |
-| `rlm_execute_code` | Run Python code on loaded content |
-| `rlm_get_variable` | Retrieve a variable's value |
-| `rlm_session_info` | Check current session state |
-| `rlm_reset_session` | Clear session to free memory |
+| `rlm_load_file` | Load a massive file |
+| `rlm_load_multiple_files` | Load multiple files as dict |
+| `rlm_execute_code` | Run Python on loaded content |
+| `rlm_get_variable` | Get a variable's value |
+| `rlm_session_info` | Check session state |
+| `rlm_reset_session` | Clear session memory |
+
+---
+
+## When to Use
+
+```
+┌─────────────────────────────┬────────────────────┐
+│          Use Case           │    Recommended     │
+├─────────────────────────────┼────────────────────┤
+│ Small files (<50KB)         │ Direct read        │
+│ Single pattern search       │ Grep               │
+│ Large files (>200KB)        │ ✅ RLM             │
+│ Complex analysis/statistics │ ✅ RLM             │
+│ Multi-pattern correlation   │ ✅ RLM             │
+│ Aggregation/counting        │ ✅ RLM             │
+│ Cross-file analysis         │ ✅ RLM             │
+└─────────────────────────────┴────────────────────┘
+```
 
 ---
 
 ## Example Session
 
 ```python
-# Claude loads a large log file
+# Load a large log
 >>> rlm_load_file("/var/log/app.log")
-File loaded: 2,847,392 chars (~711K tokens)
+File loaded: 2,847,392 chars
 
-# Claude searches for errors
+# Search for errors
 >>> rlm_execute_code("""
 import re
 errors = re.findall(r'ERROR.*', context)
 print(f"Found {len(errors)} errors")
-for e in errors[:5]:
-    print(e)
 """)
 Found 156 errors
-ERROR [2025-01-20 10:23:45] Connection timeout
-ERROR [2025-01-20 10:24:01] Database query failed
-...
 
-# Claude analyzes patterns
+# Analyze patterns
 >>> rlm_execute_code("""
 from collections import Counter
-error_types = re.findall(r'ERROR.*?\] (\w+)', context)
-for err, count in Counter(error_types).most_common(5):
-    print(f"{err}: {count}")
+types = re.findall(r'ERROR.*?\] (\w+)', context)
+print(Counter(types).most_common(5))
 """)
-Connection: 67
-Database: 43
-Timeout: 28
-...
+[('Connection', 67), ('Database', 43), ('Timeout', 28)]
 ```
 
 ---
 
-## Safety Features
+## Safety
 
-- **30-second timeout**: Runaway code is automatically killed
-- **Process isolation**: Uses multiprocessing for hard termination
-- **Output truncation**: Large outputs are truncated to prevent memory issues
-- **Session isolation**: Multiple analyses can run in parallel
-
----
-
-## When to Use RLM
-
-### Real-World Comparison: Grep/Read vs RLM -
-
-We tested both approaches on the same task: **analyzing a 300KB system log to find critical events**. using Claude Code running Opus 4.5
-
-#### Token Usage
-
-```
-┌──────────────────────────┬────────────────────────────────────┬──────────────────────────────┐
-│          Aspect          │        Method 1: Grep/Read         │        Method 2: RLM         │
-├──────────────────────────┼────────────────────────────────────┼──────────────────────────────┤
-│ Tool Calls               │ 5 calls (4 Grep + 1 Read)          │ 5 calls (1 Load + 4 Execute) │
-├──────────────────────────┼────────────────────────────────────┼──────────────────────────────┤
-│ Data Returned to Context │ ~8,000+ tokens                     │ ~800 tokens                  │
-├──────────────────────────┼────────────────────────────────────┼──────────────────────────────┤
-│ File Content in Context  │ Partial (grep results + 100 lines) │ None (processed externally)  │
-├──────────────────────────┼────────────────────────────────────┼──────────────────────────────┤
-│ Output Size              │ Large (full matching lines)        │ Small (only print() output)  │
-└──────────────────────────┴────────────────────────────────────┴──────────────────────────────┘
-```
-
-#### Token Consumption
-
-```
-┌───────────┬──────────────┬───────────────┬─────────┐
-│  Method   │ Input Tokens │ Output Tokens │  Total  │
-├───────────┼──────────────┼───────────────┼─────────┤
-│ Grep/Read │ ~10,000      │ ~2,500        │ ~12,500 │
-├───────────┼──────────────┼───────────────┼─────────┤
-│ RLM       │ ~1,500       │ ~1,200        │ ~2,700  │
-└───────────┴──────────────┴───────────────┴─────────┘
-```
-
-**RLM used 78% fewer tokens** while achieving identical results.
-
-#### Accuracy (Both Methods)
-
-```
-┌────────────────────────┬───────────┬──────────┐
-│         Metric         │ Grep/Read │   RLM    │
-├────────────────────────┼───────────┼──────────┤
-│ Kernel Events Found    │ 6 unique  │ 6 unique │
-├────────────────────────┼───────────┼──────────┤
-│ Application Crashes    │ 12        │ 12       │
-├────────────────────────┼───────────┼──────────┤
-│ Critical System Events │ 1         │ 1        │
-├────────────────────────┼───────────┼──────────┤
-│ Top 10 Match           │ ✓         │ ✓        │
-└────────────────────────┴───────────┴──────────┘
-```
-
-Both methods found the same results — but RLM did it with **78% fewer tokens**.
-
-### Decision Guide
-
-```
-┌─────────────────────────────┬────────────────────┐
-│          Use Case           │ Recommended Method │
-├─────────────────────────────┼────────────────────┤
-│ Small files (<50KB)         │ Grep/Read          │
-├─────────────────────────────┼────────────────────┤
-│ Single pattern search       │ Grep/Read          │
-├─────────────────────────────┼────────────────────┤
-│ Large files (>200KB)        │ RLM                │
-├─────────────────────────────┼────────────────────┤
-│ Complex analysis/statistics │ RLM                │
-├─────────────────────────────┼────────────────────┤
-│ Multi-pattern correlation   │ RLM                │
-├─────────────────────────────┼────────────────────┤
-│ Aggregation/counting        │ RLM                │
-└─────────────────────────────┴────────────────────┘
-```
-
-### Pros and Cons
-
-| | Grep/Read | RLM |
-|---|-----------|-----|
-| **Pros** | Native tools, no dependencies | Massive token savings |
-| | Fast for simple searches | Full file access |
-| | Good for single-pattern queries | Complex analysis possible |
-| | | Statistics/aggregation easy |
-| **Cons** | Token-heavy for large files | Requires Python knowledge |
-| | Limited to regex patterns | Extra setup (load file first) |
-| | Hard to correlate across lines | Overkill for simple searches |
-| | No aggregation/counting | |
+- **30s timeout** — Runaway code auto-killed
+- **Process isolation** — Uses multiprocessing
+- **Output truncation** — Prevents memory issues
 
 ---
 
@@ -278,28 +179,24 @@ Both methods found the same results — but RLM did it with **78% fewer tokens**
 
 - Python 3.10+
 - Claude Code with MCP support
-- No API keys required
+- No API keys needed
 
 ---
 
-## Development
+## Links
 
-```bash
-git clone https://github.com/ahmedm224/rlm-mcp
-cd rlm-mcp
-pip install -e .
-```
+- **GitHub:** https://github.com/ahmedm224/rlm-mcp
+- **Paper:** https://arxiv.org/abs/2512.24601
+- **Issues:** https://github.com/ahmedm224/rlm-mcp/issues
 
 ---
 
 ## Citation
 
-If you use this in research, please cite the original paper:
-
 ```bibtex
 @article{diao2025recursive,
   title={Recursive Language Models},
-  author={Diao, Shizhe and Liu, Tianyu and Pan, Rui and Liu, Xiang Xiang and Zhang, Jipeng and Wang, Tao and Liu, Pengfei},
+  author={Diao, Shizhe and Liu, Tianyu and Pan, Rui and others},
   journal={arXiv preprint arXiv:2512.24601},
   year={2025}
 }
@@ -309,11 +206,4 @@ If you use this in research, please cite the original paper:
 
 ## License
 
-MIT
-
----
-
-## Acknowledgments
-
-- The [Recursive Language Models paper](https://arxiv.org/abs/2512.24601) by MIT CSAIL for the foundational ideas
-- Anthropic for Claude Code and the MCP protocol
+MIT © Ahmed Ali
