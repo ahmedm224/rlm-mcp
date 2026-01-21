@@ -7,8 +7,8 @@ by providing a Python REPL environment for programmatic exploration.
 No API keys required - works with Claude Code subscriptions.
 """
 
-__version__ = "0.1.0"
-__author__ = "RLM Team"
+__version__ = "0.1.0b1"
+__author__ = "Ahmed Ali"
 
 from .server import main
 

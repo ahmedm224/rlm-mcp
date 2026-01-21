@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rlm-mcp"
-version = "0.1.0"
+version = "0.1.0b1"
 description = "MCP server for analyzing massive files with Claude Code using Recursive Language Models"
 readme = "README.md"
 license = "MIT"
@@ -43,9 +43,9 @@ dependencies = [
 rlm-mcp = "rlm_mcp:main"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/rlm-mcp"
-Repository = "https://github.com/yourusername/rlm-mcp"
-Issues = "https://github.com/yourusername/rlm-mcp/issues"
+Homepage = "https://github.com/ahmedm224/rlm-mcp"
+Repository = "https://github.com/ahmedm224/rlm-mcp"
+Issues = "https://github.com/ahmedm224/rlm-mcp/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["rlm_mcp"]

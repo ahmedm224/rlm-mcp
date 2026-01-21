@@ -1,5 +1,7 @@
 # RLM MCP Server
 
+> **🚧 BETA** - This project is in active development. Feedback welcome!
+
 > **Implementation of [Recursive Language Models (RLM)](https://arxiv.org/abs/2512.24601) from MIT**
 >
 > *"We propose treating the long context as an 'external environment' to be interacted with via a Python REPL... recursively calling sub-LLMs to analyze relevant sections."*
