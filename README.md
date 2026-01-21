@@ -79,7 +79,7 @@ RLM used 78% fewer tokens.
 Based on **[Recursive Language Models](https://arxiv.org/abs/2512.24601)** from MIT CSAIL:
 
 > *"We propose treating the long context as an 'external environment' to be interacted with via a Python REPL..."*
-> — Diao et al., 2025
+> — Alex L. Zhang, Tim Kraska, Omar Khattab (MIT), 2025
 
 ### Paper Results
 
@@ -194,9 +194,9 @@ print(Counter(types).most_common(5))
 ## Citation
 
 ```bibtex
-@article{diao2025recursive,
+@article{zhang2025recursive,
   title={Recursive Language Models},
-  author={Diao, Shizhe and Liu, Tianyu and Pan, Rui and others},
+  author={Zhang, Alex L. and Kraska, Tim and Khattab, Omar},
   journal={arXiv preprint arXiv:2512.24601},
   year={2025}
 }
