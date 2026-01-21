@@ -283,7 +283,7 @@ Both methods found the same results — but RLM did it with **78% fewer tokens**
 ## Development
 
 ```bash
-git clone https://github.com/yourusername/rlm-mcp
+git clone https://github.com/ahmedm224/rlm-mcp
 cd rlm-mcp
 pip install -e .
 ```
