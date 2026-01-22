@@ -6,6 +6,12 @@ Python code in a sandboxed REPL environment. Claude Code acts as the
 orchestrator while this server handles code execution.
 
 NO API KEYS REQUIRED - works with Claude Code subscriptions.
+
+SAFEGUARDS:
+- 10s execution timeout (auto-kill)
+- Max 10 executions per session
+- Small file warnings (<50KB)
+- Session auto-cleanup
 """
 
 import asyncio
@@ -16,13 +22,23 @@ import re
 import time
 import pickle
 import multiprocessing
-from typing import Any, Optional, Dict, Callable
-from dataclasses import dataclass, field
+from typing import Any, Optional, Dict
+from dataclasses import dataclass
 from contextlib import redirect_stdout, redirect_stderr
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
+
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+MAX_EXECUTIONS_PER_SESSION = 10  # Prevent infinite loops
+EXECUTION_TIMEOUT = 10.0  # Seconds (reduced from 30)
+SMALL_FILE_THRESHOLD = 50000  # 50KB - suggest direct reading
+MAX_OUTPUT_CHARS = 20000  # Truncate large outputs
 
 
 # ============================================================================
@@ -78,27 +94,33 @@ def _execute_in_process(code: str, globals_dict: dict, output_queue: multiproces
 
 
 class REPLEnvironment:
-    """Sandboxed Python REPL with timeout enforcement via multiprocessing."""
+    """Sandboxed Python REPL with timeout and execution limits."""
 
-    def __init__(
-        self,
-        context: Any = "",
-        max_output_chars: int = 50000,
-        execution_timeout: float = 30.0,
-    ):
-        self.max_output_chars = max_output_chars
-        self.execution_timeout = execution_timeout
+    def __init__(self, context: Any = ""):
         self._globals: Dict[str, Any] = {
             '__builtins__': __builtins__,
             'context': context,
         }
+        self.execution_count = 0
+        self.created_at = time.time()
 
     @property
     def globals(self) -> Dict[str, Any]:
         return self._globals
 
     def execute(self, code: str) -> ExecutionResult:
-        """Execute Python code with timeout protection."""
+        """Execute Python code with timeout and limits."""
+        # Check execution limit
+        if self.execution_count >= MAX_EXECUTIONS_PER_SESSION:
+            return ExecutionResult(
+                output="",
+                execution_time=0.0,
+                success=False,
+                error=f"Session limit reached ({MAX_EXECUTIONS_PER_SESSION} executions). Use rlm_reset_session to start fresh.",
+            )
+
+        self.execution_count += 1
+
         # Clean XML artifacts from code
         code = re.sub(r'</?\w+>', '', code)
         lines = code.split('\n')
@@ -133,7 +155,7 @@ class REPLEnvironment:
 
         try:
             process.start()
-            process.join(timeout=self.execution_timeout)
+            process.join(timeout=EXECUTION_TIMEOUT)
 
             if process.is_alive():
                 process.terminate()
@@ -146,7 +168,7 @@ class REPLEnvironment:
                     output="",
                     execution_time=time.time() - start_time,
                     success=False,
-                    error=f"Execution timed out after {self.execution_timeout}s (killed)",
+                    error=f"TIMEOUT after {EXECUTION_TIMEOUT}s. Code was killed. Simplify your code or break it into smaller steps.",
                 )
 
             if not output_queue.empty():
@@ -161,8 +183,8 @@ class REPLEnvironment:
                         self._globals[k] = v
 
                 # Truncate if needed
-                if len(output) > self.max_output_chars:
-                    output = output[:self.max_output_chars] + f"\n... [truncated]"
+                if len(output) > MAX_OUTPUT_CHARS:
+                    output = output[:MAX_OUTPUT_CHARS] + f"\n\n... [OUTPUT TRUNCATED - {len(output):,} chars total]"
 
                 return ExecutionResult(
                     output=output,
@@ -211,24 +233,27 @@ async def list_tools() -> list[Tool]:
     return [
         Tool(
             name="rlm_load_file",
-            description="""Load a massive file into the RLM REPL environment.
+            description="""Load a LARGE file (>50KB) into RLM for analysis.
 
-Use this for files too large for your context window. After loading:
-- 'context' variable contains the file content
-- Use rlm_execute_code to analyze with Python
+WARNING: Only use for files TOO LARGE for your context window.
+For small files (<50KB), use direct Read tool instead - it's faster.
 
-Example: Load a 10GB log file, then search it with regex.""",
+After loading, use rlm_execute_code with simple Python:
+- print(len(context)) - file size
+- print(context[:1000]) - preview
+- re.findall(r'pattern', context) - search
+
+LIMITS: 10 code executions per session, 10s timeout per execution.""",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Absolute path to the file",
+                        "description": "Absolute path to file",
                     },
                     "session_id": {
                         "type": "string",
                         "default": "default",
-                        "description": "Session ID for parallel analyses",
                     },
                 },
                 "required": ["file_path"],
@@ -236,17 +261,17 @@ Example: Load a 10GB log file, then search it with regex.""",
         ),
         Tool(
             name="rlm_load_multiple_files",
-            description="""Load multiple files into the REPL as a dict.
+            description="""Load multiple LARGE files for cross-file analysis.
 
-Files are accessible as context['filename.txt'].
-Use for cross-file analysis.""",
+Access files as: context['filename.txt']
+
+Only use when total size exceeds your context window.""",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "file_paths": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "List of absolute file paths",
                     },
                     "session_id": {
                         "type": "string",
@@ -258,25 +283,24 @@ Use for cross-file analysis.""",
         ),
         Tool(
             name="rlm_execute_code",
-            description="""Execute Python code in the REPL.
+            description="""Run Python code on loaded content.
 
-Available:
-- 'context': Loaded file content
-- Standard libraries (re, json, collections, etc.)
-- Variables persist across calls
+KEEP CODE SIMPLE:
+- One task per execution
+- Use print() to see results
+- 10s timeout - avoid loops over large data
 
-Use print() to see results. Code times out after 30s.
+GOOD: print(context.count('error'))
+GOOD: print(re.findall(r'ERROR.*', context)[:10])
+BAD: for line in context.split('\\n'): ... (slow!)
 
-Tips:
-- context[:10000] for first 10K chars
-- re.findall(r'pattern', context) for searching
-- len(context) for size""",
+Remaining executions shown in response.""",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "code": {
                         "type": "string",
-                        "description": "Python code to execute",
+                        "description": "Simple Python code",
                     },
                     "session_id": {
                         "type": "string",
@@ -288,49 +312,34 @@ Tips:
         ),
         Tool(
             name="rlm_get_variable",
-            description="""Get a variable's value from the REPL.""",
+            description="""Get a variable's value from the session.""",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "variable_name": {
-                        "type": "string",
-                        "description": "Variable name to retrieve",
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "default": "default",
-                    },
-                    "max_length": {
-                        "type": "integer",
-                        "default": 10000,
-                    },
+                    "variable_name": {"type": "string"},
+                    "session_id": {"type": "string", "default": "default"},
+                    "max_length": {"type": "integer", "default": 10000},
                 },
                 "required": ["variable_name"],
             },
         ),
         Tool(
             name="rlm_session_info",
-            description="""Get info about current REPL session.""",
+            description="""Check session status and remaining executions.""",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "session_id": {
-                        "type": "string",
-                        "default": "default",
-                    },
+                    "session_id": {"type": "string", "default": "default"},
                 },
             },
         ),
         Tool(
             name="rlm_reset_session",
-            description="""Clear a REPL session to free memory.""",
+            description="""Reset session to get 10 fresh executions.""",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "session_id": {
-                        "type": "string",
-                        "default": "default",
-                    },
+                    "session_id": {"type": "string", "default": "default"},
                 },
             },
         ),
@@ -351,19 +360,42 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
 
+            file_size = len(content)
+
+            # Warn if file is small
+            if file_size < SMALL_FILE_THRESHOLD:
+                return [TextContent(type="text", text=f"""⚠️ SMALL FILE WARNING
+
+File: {file_path}
+Size: {file_size:,} chars ({file_size//1000}KB)
+
+This file is SMALL enough to read directly.
+Use the Read tool instead - it's faster and simpler.
+
+RLM is designed for files >50KB that exceed context limits.
+
+If you still want to use RLM, call rlm_load_file again.""")]
+
+            # Clear old session
             if session_id in repl_sessions:
                 del repl_sessions[session_id]
+
             repl = get_or_create_session(session_id, context=content)
-            repl.globals["context_length"] = len(content)
+            repl.globals["context_length"] = file_size
             repl.globals["file_path"] = file_path
 
-            return [TextContent(type="text", text=f"""File loaded: {file_path}
-Size: {len(content):,} chars (~{len(content)//4:,} tokens)
+            return [TextContent(type="text", text=f"""✓ File loaded
 
-Preview:
-{content[:1000]}{'...' if len(content) > 1000 else ''}
+Path: {file_path}
+Size: {file_size:,} chars (~{file_size//4:,} tokens)
 
-Use rlm_execute_code to analyze.""")]
+Preview (first 500 chars):
+{content[:500]}{'...' if file_size > 500 else ''}
+
+Session: {session_id}
+Executions remaining: {MAX_EXECUTIONS_PER_SESSION}
+
+Use rlm_execute_code with simple Python to analyze.""")]
 
         elif name == "rlm_load_multiple_files":
             file_paths = arguments["file_paths"]
@@ -376,44 +408,67 @@ Use rlm_execute_code to analyze.""")]
                 if os.path.exists(path):
                     with open(path, "r", encoding="utf-8", errors="replace") as f:
                         content = f.read()
-                    name = os.path.basename(path)
-                    contexts[name] = content
+                    fname = os.path.basename(path)
+                    contexts[fname] = content
                     total += len(content)
-                    info.append(f"  {name}: {len(content):,} chars")
+                    info.append(f"  {fname}: {len(content):,} chars")
                 else:
                     info.append(f"  {path}: NOT FOUND")
+
+            if total < SMALL_FILE_THRESHOLD:
+                return [TextContent(type="text", text=f"""⚠️ SMALL FILES WARNING
+
+Total size: {total:,} chars ({total//1000}KB)
+
+These files are small enough to read directly.
+Use the Read tool instead.
+
+RLM is for files >50KB total.""")]
 
             if session_id in repl_sessions:
                 del repl_sessions[session_id]
             repl = get_or_create_session(session_id, context=contexts)
             repl.globals["context_length"] = total
 
-            return [TextContent(type="text", text=f"""Files loaded: {len(contexts)}
+            return [TextContent(type="text", text=f"""✓ Files loaded: {len(contexts)}
 Total: {total:,} chars
 
 {chr(10).join(info)}
 
-Access: context['filename.txt']""")]
+Access: context['filename.txt']
+Executions remaining: {MAX_EXECUTIONS_PER_SESSION}""")]
 
         elif name == "rlm_execute_code":
             code = arguments["code"]
             session_id = arguments.get("session_id", "default")
 
-            repl = get_or_create_session(session_id)
+            if session_id not in repl_sessions:
+                return [TextContent(type="text", text="Error: No file loaded. Use rlm_load_file first.")]
+
+            repl = repl_sessions[session_id]
+            remaining_before = MAX_EXECUTIONS_PER_SESSION - repl.execution_count
+
             result = repl.execute(code)
+            remaining_after = MAX_EXECUTIONS_PER_SESSION - repl.execution_count
 
             if result.success:
                 output = result.output or "(no output - use print())"
-                return [TextContent(type="text", text=f"OK ({result.execution_time:.2f}s)\n\n{output}")]
+                status = f"✓ OK ({result.execution_time:.1f}s) | {remaining_after} executions left"
+                if remaining_after <= 3:
+                    status += " ⚠️"
+                return [TextContent(type="text", text=f"{status}\n\n{output}")]
             else:
-                return [TextContent(type="text", text=f"Error: {result.error}")]
+                return [TextContent(type="text", text=f"✗ Error | {remaining_after} executions left\n\n{result.error}")]
 
         elif name == "rlm_get_variable":
             var_name = arguments["variable_name"]
             session_id = arguments.get("session_id", "default")
             max_len = arguments.get("max_length", 10000)
 
-            repl = get_or_create_session(session_id)
+            if session_id not in repl_sessions:
+                return [TextContent(type="text", text="No session found")]
+
+            repl = repl_sessions[session_id]
             if var_name not in repl.globals:
                 return [TextContent(type="text", text=f"Variable '{var_name}' not found")]
 
@@ -425,25 +480,27 @@ Access: context['filename.txt']""")]
         elif name == "rlm_session_info":
             session_id = arguments.get("session_id", "default")
             if session_id not in repl_sessions:
-                return [TextContent(type="text", text=f"Session '{session_id}' not found")]
+                return [TextContent(type="text", text=f"No session '{session_id}'. Use rlm_load_file to start.")]
 
             repl = repl_sessions[session_id]
-            vars_info = []
-            for k, v in repl.globals.items():
-                if k not in ['__builtins__', 'context']:
-                    vars_info.append(f"  {k}: {type(v).__name__}")
+            remaining = MAX_EXECUTIONS_PER_SESSION - repl.execution_count
+            ctx_len = repl.globals.get('context_length', 0)
+            age = int(time.time() - repl.created_at)
 
-            ctx_len = repl.globals.get('context_length', len(str(repl.globals.get('context', ''))))
+            vars_info = [k for k in repl.globals.keys() if k not in ['__builtins__', 'context']]
+
             return [TextContent(type="text", text=f"""Session: {session_id}
 Context: {ctx_len:,} chars
-Variables:
-{chr(10).join(vars_info) or '  (none)'}""")]
+Executions: {repl.execution_count}/{MAX_EXECUTIONS_PER_SESSION} used
+Remaining: {remaining}
+Age: {age}s
+Variables: {', '.join(vars_info) or '(none)'}""")]
 
         elif name == "rlm_reset_session":
             session_id = arguments.get("session_id", "default")
             if session_id in repl_sessions:
                 del repl_sessions[session_id]
-            return [TextContent(type="text", text=f"Session '{session_id}' reset")]
+            return [TextContent(type="text", text=f"✓ Session '{session_id}' reset. Load a file to start fresh.")]
 
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -464,7 +521,6 @@ async def run_server():
 
 def main():
     """Entry point."""
-    # Windows multiprocessing fix
     if sys.platform == 'win32':
         multiprocessing.set_start_method('spawn', force=True)
     asyncio.run(run_server())
