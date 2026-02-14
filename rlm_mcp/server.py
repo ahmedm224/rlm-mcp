@@ -41,6 +41,7 @@ EXECUTION_TIMEOUT = 10.0  # Seconds (reduced from 30)
 SMALL_FILE_THRESHOLD = 50000  # 50KB - suggest direct reading
 MAX_OUTPUT_CHARS = 20000  # Truncate large outputs
 MAX_SESSION_RESETS = 2  # Max resets per session to prevent infinite loops
+READ_CHUNK_SIZE = 1024 * 1024  # 1MB chunks for progress reporting
 
 
 # ============================================================================
@@ -230,6 +231,57 @@ def get_or_create_session(session_id: str = "default", context: Any = None) -> R
     return repl_sessions[session_id]
 
 
+async def _send_progress(current: float, total: float, message: str) -> None:
+    """Send MCP progress notification if a progress token is available."""
+    try:
+        ctx = server.request_context
+        if ctx.meta and ctx.meta.progressToken:
+            await ctx.session.send_progress_notification(
+                progress_token=ctx.meta.progressToken,
+                progress=current,
+                total=total,
+                message=message,
+            )
+    except (LookupError, Exception):
+        pass  # No request context or notification failed — continue silently
+
+
+async def _read_file_chunked(file_path: str, progress_offset: int = 0, progress_total: int = 0) -> str:
+    """Read file in 1MB chunks with MCP progress notifications.
+
+    Args:
+        file_path: Path to read.
+        progress_offset: Bytes already read before this file (for multi-file progress).
+        progress_total: Total bytes across all files (0 = auto-detect from this file).
+    """
+    file_byte_size = os.path.getsize(file_path)
+    if progress_total == 0:
+        progress_total = file_byte_size
+
+    fname = os.path.basename(file_path)
+    chunks = []
+    bytes_read = 0
+    last_pct = -1
+
+    with open(file_path, "rb") as f:
+        while True:
+            chunk = f.read(READ_CHUNK_SIZE)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            bytes_read += len(chunk)
+
+            pct = int((progress_offset + bytes_read) * 100 / progress_total) if progress_total > 0 else 100
+            if pct > last_pct:
+                last_pct = pct
+                await _send_progress(
+                    progress_offset + bytes_read, progress_total,
+                    f"Reading {fname}... {pct}%"
+                )
+
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
 @server.list_tools()
 async def list_tools() -> list[Tool]:
     """List available RLM tools."""
@@ -365,9 +417,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if not os.path.exists(file_path):
                 return [TextContent(type="text", text=f"Error: File not found: {file_path}")]
 
-            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
-
+            content = await _read_file_chunked(file_path)
             file_size = len(content)
 
             # Note if file is small (but still load it to avoid retry loops)
@@ -407,11 +457,19 @@ Ready. Run 2-5 targeted queries, then summarize findings.""")]
             contexts = {}
             total = 0
             info = []
+
+            # Calculate total byte size for overall progress
+            total_bytes = 0
             for path in file_paths:
                 if os.path.exists(path):
-                    with open(path, "r", encoding="utf-8", errors="replace") as f:
-                        content = f.read()
+                    total_bytes += os.path.getsize(path)
+
+            bytes_offset = 0
+            for path in file_paths:
+                if os.path.exists(path):
                     fname = os.path.basename(path)
+                    content = await _read_file_chunked(path, bytes_offset, total_bytes)
+                    bytes_offset += os.path.getsize(path)
                     contexts[fname] = content
                     total += len(content)
                     info.append(f"  {fname}: {len(content):,} chars")
