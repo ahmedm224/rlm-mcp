@@ -10,8 +10,9 @@ NO API KEYS REQUIRED - works with Claude Code subscriptions.
 SAFEGUARDS:
 - 10s execution timeout (auto-kill)
 - Max 10 executions per session
-- Small file warnings (<50KB)
-- Session auto-cleanup
+- Max 2 session resets (prevents infinite reset-analyze loops)
+- Small files load with warning (no blocking retry loops)
+- Progress indicators [X/10] on every execution
 """
 
 import asyncio
@@ -39,6 +40,7 @@ MAX_EXECUTIONS_PER_SESSION = 10  # Prevent infinite loops
 EXECUTION_TIMEOUT = 10.0  # Seconds (reduced from 30)
 SMALL_FILE_THRESHOLD = 50000  # 50KB - suggest direct reading
 MAX_OUTPUT_CHARS = 20000  # Truncate large outputs
+MAX_SESSION_RESETS = 2  # Max resets per session to prevent infinite loops
 
 
 # ============================================================================
@@ -116,7 +118,7 @@ class REPLEnvironment:
                 output="",
                 execution_time=0.0,
                 success=False,
-                error=f"Session limit reached ({MAX_EXECUTIONS_PER_SESSION} executions). Use rlm_reset_session to start fresh.",
+                error=f"Session limit reached ({MAX_EXECUTIONS_PER_SESSION} executions). STOP here and summarize your findings from the results you already gathered. Do NOT reset the session to re-analyze the same file.",
             )
 
         self.execution_count += 1
@@ -168,7 +170,7 @@ class REPLEnvironment:
                     output="",
                     execution_time=time.time() - start_time,
                     success=False,
-                    error=f"TIMEOUT after {EXECUTION_TIMEOUT}s. Code was killed. Simplify your code or break it into smaller steps.",
+                    error=f"TIMEOUT after {EXECUTION_TIMEOUT}s. Code was killed. Try a completely different approach (avoid loops, use string methods or sampling instead). Do NOT retry the same code.",
                 )
 
             if not output_queue.empty():
@@ -218,6 +220,7 @@ class REPLEnvironment:
 
 server = Server("rlm-mcp-server")
 repl_sessions: Dict[str, REPLEnvironment] = {}
+session_reset_counts: Dict[str, int] = {}  # Track resets to prevent infinite loops
 
 
 def get_or_create_session(session_id: str = "default", context: Any = None) -> REPLEnvironment:
@@ -243,7 +246,10 @@ After loading, use rlm_execute_code with simple Python:
 - print(context[:1000]) - preview
 - re.findall(r'pattern', context) - search
 
-LIMITS: 10 code executions per session, 10s timeout per execution.""",
+LIMITS: 10 code executions per session, 10s timeout per execution.
+
+WORKFLOW: Load file → Run 2-5 targeted queries → Summarize findings → STOP.
+Do NOT enter a loop of resetting and re-analyzing the same file.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -283,7 +289,7 @@ Only use when total size exceeds your context window.""",
         ),
         Tool(
             name="rlm_execute_code",
-            description="""Run Python code on loaded content.
+            description="""Run Python code on loaded content. Shows progress as [X/10].
 
 KEEP CODE SIMPLE:
 - One task per execution
@@ -294,7 +300,8 @@ GOOD: print(context.count('error'))
 GOOD: print(re.findall(r'ERROR.*', context)[:10])
 BAD: for line in context.split('\\n'): ... (slow!)
 
-Remaining executions shown in response.""",
+IMPORTANT: When executions run low (<=3 left), STOP and summarize findings.
+Do NOT reset the session to keep analyzing — deliver your results.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -335,7 +342,8 @@ Remaining executions shown in response.""",
         ),
         Tool(
             name="rlm_reset_session",
-            description="""Reset session to get 10 fresh executions.""",
+            description="""Reset session (max 2 resets allowed). Only use to load a DIFFERENT file.
+Do NOT reset to continue analyzing the same file — summarize your findings instead.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -362,19 +370,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             file_size = len(content)
 
-            # Warn if file is small
+            # Note if file is small (but still load it to avoid retry loops)
+            small_file_note = ""
             if file_size < SMALL_FILE_THRESHOLD:
-                return [TextContent(type="text", text=f"""⚠️ SMALL FILE WARNING
-
-File: {file_path}
-Size: {file_size:,} chars ({file_size//1000}KB)
-
-This file is SMALL enough to read directly.
-Use the Read tool instead - it's faster and simpler.
-
-RLM is designed for files >50KB that exceed context limits.
-
-If you still want to use RLM, call rlm_load_file again.""")]
+                small_file_note = f"\n⚠️ NOTE: This file is only {file_size//1000}KB. Next time, use the Read tool directly for small files — it's faster.\n"
 
             # Clear old session
             if session_id in repl_sessions:
@@ -384,18 +383,22 @@ If you still want to use RLM, call rlm_load_file again.""")]
             repl.globals["context_length"] = file_size
             repl.globals["file_path"] = file_path
 
-            return [TextContent(type="text", text=f"""✓ File loaded
+            line_count = content.count('\n') + 1
+            size_mb = file_size / (1024 * 1024)
+            size_display = f"{size_mb:.1f}MB" if size_mb >= 1 else f"{file_size // 1000}KB"
 
+            return [TextContent(type="text", text=f"""✓ File loaded [{size_display}, {line_count:,} lines]
+{small_file_note}
 Path: {file_path}
 Size: {file_size:,} chars (~{file_size//4:,} tokens)
+Lines: {line_count:,}
 
 Preview (first 500 chars):
 {content[:500]}{'...' if file_size > 500 else ''}
 
-Session: {session_id}
-Executions remaining: {MAX_EXECUTIONS_PER_SESSION}
+Session: {session_id} | Executions: 0/{MAX_EXECUTIONS_PER_SESSION}
 
-Use rlm_execute_code with simple Python to analyze.""")]
+Ready. Run 2-5 targeted queries, then summarize findings.""")]
 
         elif name == "rlm_load_multiple_files":
             file_paths = arguments["file_paths"]
@@ -415,28 +418,26 @@ Use rlm_execute_code with simple Python to analyze.""")]
                 else:
                     info.append(f"  {path}: NOT FOUND")
 
+            small_files_note = ""
             if total < SMALL_FILE_THRESHOLD:
-                return [TextContent(type="text", text=f"""⚠️ SMALL FILES WARNING
-
-Total size: {total:,} chars ({total//1000}KB)
-
-These files are small enough to read directly.
-Use the Read tool instead.
-
-RLM is for files >50KB total.""")]
+                small_files_note = f"\n⚠️ NOTE: Total size is only {total//1000}KB. Next time, use the Read tool directly for small files.\n"
 
             if session_id in repl_sessions:
                 del repl_sessions[session_id]
             repl = get_or_create_session(session_id, context=contexts)
             repl.globals["context_length"] = total
 
-            return [TextContent(type="text", text=f"""✓ Files loaded: {len(contexts)}
-Total: {total:,} chars
+            total_mb = total / (1024 * 1024)
+            size_display = f"{total_mb:.1f}MB" if total_mb >= 1 else f"{total // 1000}KB"
 
+            return [TextContent(type="text", text=f"""✓ {len(contexts)} files loaded [{size_display}, ~{total//4:,} tokens]
+{small_files_note}
 {chr(10).join(info)}
 
 Access: context['filename.txt']
-Executions remaining: {MAX_EXECUTIONS_PER_SESSION}""")]
+Session: {session_id} | Executions: 0/{MAX_EXECUTIONS_PER_SESSION}
+
+Ready. Run 2-5 targeted queries, then summarize findings.""")]
 
         elif name == "rlm_execute_code":
             code = arguments["code"]
@@ -451,14 +452,20 @@ Executions remaining: {MAX_EXECUTIONS_PER_SESSION}""")]
             result = repl.execute(code)
             remaining_after = MAX_EXECUTIONS_PER_SESSION - repl.execution_count
 
+            exec_num = repl.execution_count
+            progress = f"[{exec_num}/{MAX_EXECUTIONS_PER_SESSION}]"
+
             if result.success:
                 output = result.output or "(no output - use print())"
-                status = f"✓ OK ({result.execution_time:.1f}s) | {remaining_after} executions left"
+                status = f"✓ {progress} OK ({result.execution_time:.1f}s)"
                 if remaining_after <= 3:
-                    status += " ⚠️"
+                    status += f" — ⚠️ {remaining_after} left, wrap up your analysis"
                 return [TextContent(type="text", text=f"{status}\n\n{output}")]
             else:
-                return [TextContent(type="text", text=f"✗ Error | {remaining_after} executions left\n\n{result.error}")]
+                status = f"✗ {progress} Error"
+                if remaining_after <= 3:
+                    status += f" — ⚠️ {remaining_after} left, consider summarizing what you have"
+                return [TextContent(type="text", text=f"{status}\n\n{result.error}")]
 
         elif name == "rlm_get_variable":
             var_name = arguments["variable_name"]
@@ -498,9 +505,16 @@ Variables: {', '.join(vars_info) or '(none)'}""")]
 
         elif name == "rlm_reset_session":
             session_id = arguments.get("session_id", "default")
+
+            # Track resets to prevent infinite reset-analyze loops
+            reset_count = session_reset_counts.get(session_id, 0)
+            if reset_count >= MAX_SESSION_RESETS:
+                return [TextContent(type="text", text=f"⚠️ Reset limit reached ({MAX_SESSION_RESETS} resets for session '{session_id}'). You have enough data — STOP and summarize your findings now. Do NOT attempt further resets.")]
+
+            session_reset_counts[session_id] = reset_count + 1
             if session_id in repl_sessions:
                 del repl_sessions[session_id]
-            return [TextContent(type="text", text=f"✓ Session '{session_id}' reset. Load a file to start fresh.")]
+            return [TextContent(type="text", text=f"✓ Session '{session_id}' reset ({reset_count + 1}/{MAX_SESSION_RESETS} resets used). Load a file to continue.")]
 
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
